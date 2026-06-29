@@ -1,0 +1,6 @@
+{
+  "name": "Placement War Room",
+  "description": "AI-powered tactical command center for placement preparation. Uses multi-agent Gemini AI system for personalized strategy planning, resume analysis, and skill gap detection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
