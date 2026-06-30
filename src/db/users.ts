@@ -18,3 +18,24 @@ export async function getOrCreateUser(uid: string, email: string) {
 
   return result[0];
 }
+
+export async function updateUserProfile(uid: string, profile: {
+  name?: string;
+  branch?: string;
+  gradYear?: number;
+  cgpa?: string;
+  targetCompanies?: string;
+  preferredRole?: string;
+  skills?: string;
+  resumeText?: string;
+  readinessScore?: string;
+  skillMatrix?: string;
+  resumeResult?: string;
+}) {
+  const result = await db.update(users)
+    .set(profile)
+    .where(eq(users.uid, uid))
+    .returning();
+
+  return result[0];
+}

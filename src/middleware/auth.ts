@@ -1,14 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin.ts';
-import { DecodedIdToken } from 'firebase-admin/auth';
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: { uid: string, email: string };
 }
 
 /**
- * Firebase Auth middleware — verifies the Bearer token from the Authorization header.
- * Also supports a guest demo mode for quick testing.
+ * Hackathon Dummy Auth middleware — verifies the Bearer token from the Authorization header
+ * and uses it directly as the user's unique ID.
  */
 export const requireAuth = async (
   req: AuthRequest,
@@ -23,20 +21,11 @@ export const requireAuth = async (
 
   const token = authHeader.split('Bearer ')[1];
   
-  // Guest demo bypass — allows testing without Firebase auth
-  if (token === 'guest_token') {
-    req.user = { uid: 'guest_123', email: 'guest@placement-war.app' } as any;
+  // Token is just the username for hackathon
+  if (token) {
+    req.user = { uid: token, email: `${token}@placement-war.app` };
     next();
-    return;
-  }
-
-  try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
-    req.user = decodedToken;
-    next();
-  } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
+  } else {
     res.status(401).json({ error: 'Unauthorized: Invalid token' });
-    return;
   }
 };

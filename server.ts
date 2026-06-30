@@ -7,9 +7,10 @@ import { createServer as createViteServer } from "vite";
 import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
 import { db } from './src/db/index.ts';
 import { users } from './src/db/schema.ts';
-import { getOrCreateUser } from './src/db/users.ts';
+import { getOrCreateUser, updateUserProfile } from './src/db/users.ts';
+import { getUserMissions, createMissions, addCustomMission, updateMissionStatus } from './src/db/missions.ts';
 import multer from 'multer';
-import { strategyAgent, resumeAgent, skillGapAgent } from './src/lib/ai/agents.ts';
+import { masterOnboardingAgent, resumeAgent } from './src/lib/ai/agents.ts';
 import { parseResumePDF } from './src/lib/ai/resume.ts';
 import { eq } from 'drizzle-orm';
 import { missions } from './src/db/schema.ts';
@@ -42,45 +43,91 @@ async function startServer() {
     }
   });
 
-  // Strategy Agent — generates daily placement prep missions
+  // Update user profile (onboarding & settings)
+  app.put("/api/profile", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      const { name, branch, gradYear, cgpa, targetCompanies, preferredRole, skills } = req.body;
+      const updated = await updateUserProfile(req.user.uid, {
+        name, branch, gradYear, cgpa, targetCompanies, preferredRole, skills
+      });
+      res.json({ success: true, user: updated });
+    } catch (error) {
+      console.error("Profile update error:", error);
+      res.status(500).json({ error: "Failed to update profile" });
+    }
+  });
+
+  // Master Onboarding Agent — Curriculum Strategy, Skill Matrix & Readiness
   app.post("/api/agents/strategy", requireAuth, async (req: AuthRequest, res) => {
     try {
-      let user: any;
-      try {
-        user = await getOrCreateUser(req.user!.uid, req.user!.email || '');
-      } catch (dbErr: any) {
-        console.warn("DB user fetch failed, using fallback profile:", dbErr.message);
-        user = { id: 0, uid: req.user!.uid, email: req.user!.email };
-      }
+      const user = await getOrCreateUser(req.user!.uid, req.user!.email || '');
       
-      const newMissions = await strategyAgent(user);
-      
-      // Persist missions to database
-      try {
-        if (newMissions && newMissions.length > 0 && user.id > 0) {
-          for (const m of newMissions) {
-            await db.insert(missions).values({
-              userId: user.id,
-              title: m.title || 'Untitled Mission',
-              description: m.description || '',
-              type: m.type || 'DSA',
-              status: 'PENDING'
-            });
-          }
-        }
-      } catch (saveErr: any) {
-        console.warn("Failed to persist missions (non-critical):", saveErr.message);
+      // Check if they already have missions
+      const existingMissions = await getUserMissions(req.user!.uid);
+      if (existingMissions.length > 0 && !req.body.force) {
+        res.json({ success: true, missions: existingMissions });
+        return;
       }
 
-      res.json({ success: true, missions: newMissions });
+      // Generate full onboarding data (Curriculum, Skill Matrix, Readiness) in ONE API call
+      const onboardingData = await masterOnboardingAgent(user);
+      
+      // Persist missions to DB
+      const savedMissions = await createMissions(req.user!.uid, onboardingData.curriculum);
+      
+      // Update profile with readiness score and skill matrix
+      const readinessScoreStr = JSON.stringify(onboardingData.readiness);
+      const skillMatrixStr = JSON.stringify(onboardingData.skillMatrix);
+      await updateUserProfile(user.uid, { 
+        readinessScore: readinessScoreStr,
+        skillMatrix: skillMatrixStr
+      });
+
+      res.json({ 
+        success: true, 
+        missions: savedMissions,
+        skillMatrix: onboardingData.skillMatrix,
+        readiness: onboardingData.readiness
+      });
     } catch (error: any) {
       console.error("Strategy Agent error:", error?.message || error);
-      const fallback = [
-        { title: 'Solve 2 LeetCode Medium problems on Trees', type: 'DSA', description: 'Practice BFS/DFS traversal patterns.' },
-        { title: 'Study DBMS: Normalization & Indexing', type: 'DBMS', description: 'Review 1NF-BCNF and B+ Trees.' },
-        { title: 'Mock Interview: Behavioral Round Prep', type: 'RESUME', description: 'Prepare STAR method answers.' },
-      ];
-      res.json({ success: true, missions: fallback });
+      res.status(500).json({ error: "Failed to generate roadmap curriculum" });
+    }
+  });
+
+  // Fetch Existing Missions
+  app.get("/api/missions", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const missions = await getUserMissions(req.user!.uid);
+      res.json({ success: true, missions });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch missions" });
+    }
+  });
+
+  // Add Custom Mission
+  app.post("/api/missions/custom", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { title, description, type } = req.body;
+      if (!title) return res.status(400).json({ error: "Title required" });
+      const mission = await addCustomMission(req.user!.uid, { title, description, type: type || 'CUSTOM' });
+      res.json({ success: true, mission });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to add mission" });
+    }
+  });
+
+  // Update Mission Status
+  app.put("/api/missions/:id/status", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const mission = await updateMissionStatus(parseInt(req.params.id), req.body.status);
+      res.json({ success: true, mission });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to update mission" });
     }
   });
 
@@ -95,6 +142,9 @@ async function startServer() {
       const resumeText = await parseResumePDF(req.file.buffer);
       const result = await resumeAgent(resumeText, user.preferredRole || 'Software Engineer');
       
+      const resumeResultStr = JSON.stringify({ atsScore: result.atsScore, feedback: result.feedback });
+      await updateUserProfile(user.uid, { resumeResult: resumeResultStr });
+
       res.json({ success: true, atsScore: result.atsScore, feedback: result.feedback });
     } catch (error) {
       console.error("Resume Agent error:", error);
@@ -102,18 +152,59 @@ async function startServer() {
     }
   });
 
-  // Skill Gap Agent — identifies missing skills for target company
-  app.post("/api/agents/skill-gap", requireAuth, async (req: AuthRequest, res) => {
+
+
+  // Extract skills from uploaded resume/CV
+  app.post("/api/extract-skills", requireAuth, upload.single('resume'), async (req: AuthRequest, res) => {
     try {
+      console.log(`[Extract Skills] Request received from ${req.user!.uid}`);
+      if (!req.file) {
+        res.status(400).json({ error: "No file provided" });
+        return;
+      }
+      const resumeText = await parseResumePDF(req.file.buffer);
+      console.log(`[Extract Skills] PDF parsed. Length: ${resumeText.length}`);
+
+      // Use Gemini to extract skills from the resume text
+      const { genai } = await import('./src/lib/ai/index.ts');
+      let skills = '';
+      
+      try {
+        const response = await genai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: `Extract all technical skills, programming languages, frameworks, tools, and technologies mentioned in this resume. Return ONLY a comma-separated list of skills, nothing else. No explanations, no categories, just the skills separated by commas.
+
+Resume:
+${resumeText}`,
+        });
+        skills = (response.text || '').trim();
+        console.log(`[Extract Skills] Extracted successfully: ${skills}`);
+      } catch (genaiErr: any) {
+        console.error("[Extract Skills] Gemini API error:", genaiErr?.message);
+        if (genaiErr?.status === 429 || (genaiErr?.message && genaiErr.message.includes('429'))) {
+          res.status(429).json({ error: "API Quota Exceeded. Please try again later or check your Gemini plan." });
+          return;
+        }
+        res.status(500).json({ error: "Failed to extract skills via AI." });
+        return;
+      }
+
       const user = await getOrCreateUser(req.user!.uid, req.user!.email || '');
-      const result = await skillGapAgent(
-        user.skills || 'JavaScript, React, Node.js',
-        user.targetCompanies || 'Top Tech Companies'
-      );
-      res.json({ success: true, ...result });
-    } catch (error) {
-      console.error("Skill Gap Agent error:", error);
-      res.status(500).json({ error: "Skill gap analysis failed" });
+
+      // Save extracted skills and resume text to user profile
+      try {
+        await updateUserProfile(req.user!.uid, {
+          skills,
+          resumeText
+        });
+      } catch (dbErr: any) {
+        console.warn("Failed to save extracted skills to DB:", dbErr.message);
+      }
+
+      res.json({ success: true, skills, resumeText: resumeText.substring(0, 500) });
+    } catch (error: any) {
+      console.error("Skill extraction error:", error?.message || error);
+      res.status(500).json({ error: "Failed to extract skills from resume" });
     }
   });
 

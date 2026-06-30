@@ -11,9 +11,11 @@ export const users = pgTable('users', {
   cgpa: text('cgpa'),
   targetCompanies: text('target_companies'),
   preferredRole: text('preferred_role'),
-  skills: text('skills'), // JSON string of skills
+  skills: text('skills'), // Comma separated string of skills
   resumeText: text('resume_text'),
   readinessScore: text('readiness_score'), // JSON string of scores
+  skillMatrix: text('skill_matrix'), // JSON string of acquired/missing skills
+  resumeResult: text('resume_result'), // JSON string of ATS score and feedback
   createdAt: timestamp('created_at').defaultNow(),
 });
 
